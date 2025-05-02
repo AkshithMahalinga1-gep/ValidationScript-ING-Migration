@@ -31,13 +31,18 @@ for excel_file in EXCEL_FILES:
 
     # --- Load Excel Sheets ---
     sheets = pd.read_excel(excel_file, sheet_name=None)
+    sheets = {sheet_name: sheet_data for i, (sheet_name, sheet_data) in enumerate(sheets.items()) if i > 0}    
     print("Loaded sheets:", sheets.keys())
     srsa_df = sheets["Supplier Risk Assessment Header"]
     form_df = sheets["Form Details"]
     response_df = sheets["Form Response"]
 
-    # --- Initialize Result Log ---
-    validation_log = []
+    # --- Initialize Validation Logs for Each Sheet ---
+    validation_logs = {
+        "Supplier Risk Assessment Header": [],
+        "Form Details": [],
+        "Form Response": [],
+    }
 
     # --- Validation Loop ---
     for _, srsa in srsa_df.iterrows():
@@ -54,7 +59,10 @@ for excel_file in EXCEL_FILES:
                 preContractSrsa_internalDocumentId = srsa_pre_contract_doc["internalDocumentId"]
 
         if preContractSrsa_internalDocumentId == "":
-            validation_log.append({"ReferenceID": reference_id, "Issue": "Pre Contract SRSA document missing"})
+            validation_logs["Supplier Risk Assessment Header"].append({
+                "ReferenceID": reference_id,
+                "Issue": "Pre Contract SRSA document missing"
+            })
             continue
 
         expected_forms = form_df[form_df["Reference ID*"] == reference_id]
@@ -78,21 +86,23 @@ for excel_file in EXCEL_FILES:
             masterFormId = form.get("Master Form ID*")
             print(f"Validating Form ID: {masterFormId} form Found is {form}")
             if masterFormId not in found_form_ids:
-                validation_log.append({
+                validation_logs["Form Details"].append({
                     "ReferenceID": reference_id,
                     "FormID": masterFormId,
                     "Issue": "Form missing in DB"
                 })
 
     # --- Output Result ---
-    if validation_log:
-        result_df = pd.DataFrame(validation_log)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        input_file_name = os.path.splitext(os.path.basename(excel_file))[0]
-        output_file_name = f"{input_file_name}_ValidationResult_{timestamp}.csv"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    input_file_name = os.path.splitext(os.path.basename(excel_file))[0]
+    output_file_name = f"{input_file_name}_ValidationResult_{timestamp}.xlsx"
 
-        # Save the result DataFrame to the constructed file name
-        result_df.to_csv(output_file_name, index=False)
-        print(f"Validation issues found for {excel_file}. See {output_file_name}")
-    else:
-        print(f"Validation successful for {excel_file}. All data matched.")
+    with pd.ExcelWriter(output_file_name, engine='xlsxwriter') as writer:
+        # Write validation logs to corresponding sheets
+        for sheet_name, sheet_data in sheets.items():
+            # Write original data to the sheet
+            if validation_logs[sheet_name]:
+                validation_df = pd.DataFrame(validation_logs[sheet_name])
+                validation_df.to_excel(writer, sheet_name=f"{sheet_name}_Validation", index=False)
+
+        print(f"Validation results saved to {output_file_name}")

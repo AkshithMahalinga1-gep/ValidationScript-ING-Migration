@@ -29,7 +29,6 @@ db = client[DB_NAME]
 for excel_file in EXCEL_FILES:
     print(f"Processing file: {excel_file}")
 
-    # --- Load Excel Sheets ---
     sheets = pd.read_excel(excel_file, sheet_name=None)
     sheets = {sheet_name: sheet_data for i, (sheet_name, sheet_data) in enumerate(sheets.items()) if i > 0}    
     print("Loaded sheets:", sheets.keys())
@@ -37,14 +36,12 @@ for excel_file in EXCEL_FILES:
     form_df = sheets["Form Details"]
     response_df = sheets["Form Response"]
 
-    # --- Initialize Validation Logs for Each Sheet ---
     validation_logs = {
         "Supplier Risk Assessment Header": [],
         "Form Details": [],
         "Form Response": [],
     }
 
-    # --- Validation Loop ---
     for _, srsa in srsa_df.iterrows():
         print(f"Validating Reference ID: {srsa['Reference ID*']}")
         reference_id = srsa["Reference ID*"]

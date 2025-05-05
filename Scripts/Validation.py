@@ -4,6 +4,11 @@ from tkinter import Tk
 from tkinter.filedialog import askopenfilenames
 import os
 from datetime import datetime
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
+
+
 
 # --- Configuration ---
 MONGO_URI = "mongodb+srv://uatleoeutenantdocteamsro:XnfQ6pixSookjshO@uat-eu-leo.mwfvc.mongodb.net/?ssl=true&authSource=admin&retryWrites=true&readPreference=secondaryPreferred&w=majority&wtimeoutMS=5000&readConcernLevel=majority&retryReads=true&appName=docteamtprmro"
@@ -32,12 +37,11 @@ def load_excel_sheets(file_path):
     sheets = pd.read_excel(file_path, sheet_name=None)
     # Skip the first sheet
     sheets = {sheet_name: sheet_data for i, (sheet_name, sheet_data) in enumerate(sheets.items()) if i > 0}
-    print(f"Loaded sheets: {sheets.keys()}")
     return sheets
 
 # --- Fetch SRSA Documents ---
 def fetch_srsa_documents(db, contract_ids):
-    print(f"Fetching Post Contract SRSA documents for contract IDs: {contract_ids}")
+    print(f"Fetching Post Contract SRSA documents for contract IDs...")
     srsa_docs = list(db[SRSA_COLLECTION].find(
         {"revisedContractNumber": {"$in": contract_ids}, "isDeleted": False},
         {"internalDocumentId": 1, "documentNumber": 1, "revisedContractNumber": 1}
@@ -47,7 +51,7 @@ def fetch_srsa_documents(db, contract_ids):
 
 # --- Fetch Pre-Contract SRSA Documents ---
 def fetch_pre_contract_srsa_documents(db, document_numbers):
-    print(f"Fetching Pre Contract SRSA documents for document numbers: {document_numbers}")
+    print(f"Fetching Pre Contract SRSA documents for document numbers...")
     pre_contract_srsa_docs = list(db[SRSA_COLLECTION].find(
         {"documentNumber": {"$in": document_numbers}, "dueDiligencePhase": "Pre Contract"},
         {"internalDocumentId": 1, "documentNumber": 1}
@@ -57,7 +61,7 @@ def fetch_pre_contract_srsa_documents(db, document_numbers):
 
 # --- Fetch Control Forms ---
 def fetch_control_forms(db, pre_contract_srsa_ids):
-    print(f"Fetching Control Forms for SRSA IDs: {pre_contract_srsa_ids}")
+    print(f"Fetching Control Forms for Pre Contract SRSAs...")
     control_forms = list(db[FORM_COLLECTION].find(
         {
             "supplierRSAId": {"$in": pre_contract_srsa_ids},
@@ -69,7 +73,8 @@ def fetch_control_forms(db, pre_contract_srsa_ids):
     print(f"Fetched {len(control_forms)} Control Forms")
     return control_forms
 
-# --- Validate Data ---
+from concurrent.futures import ThreadPoolExecutor
+
 def validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map):
     validation_logs = {
         "Supplier Risk Assessment Header": [],
@@ -77,7 +82,7 @@ def validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, con
         "Form Response": [],
     }
 
-    for _, srsa in srsa_df.iterrows():
+    def validate_srsa_row(srsa):
         reference_id = srsa["Reference ID*"]
         contract_id = srsa["Contract Id"]
         srsa_doc = srsa_doc_map.get(contract_id)
@@ -90,27 +95,46 @@ def validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, con
                 preContractSrsa_internalDocumentId = srsa_pre_contract_doc["internalDocumentId"]
 
         if preContractSrsa_internalDocumentId == "":
-            validation_logs["Supplier Risk Assessment Header"].append({
-                "ReferenceID": reference_id,
-                "Issue": "Pre Contract SRSA document missing",
-                "ContractID": contract_id
-            })
-            continue
+            return {
+                "log_type": "Supplier Risk Assessment Header",
+                "log": {
+                    "ReferenceID": reference_id,
+                    "Issue": "Pre Contract SRSA document missing",
+                    "ContractID": contract_id
+                }
+            }
 
         linked_forms = control_form_map.get(preContractSrsa_internalDocumentId, [])
         found_form_ids = {form["sourceFormDocumentNumber"] for form in linked_forms}
         expected_forms = form_df[form_df["Reference ID*"] == reference_id]
 
+        form_logs = []
         for _, form in expected_forms.iterrows():
             masterFormId = form.get("Master Form ID*")
             if masterFormId not in found_form_ids:
-                validation_logs["Form Details"].append({
+                form_logs.append({
                     "ReferenceID": reference_id,
                     "FormID": masterFormId,
                     "Issue": "Form missing in DB",
                     "SRSAID": preContractSrsa_internalDocumentId,
                     "SRSDocumentNumber": documentNumber
                 })
+
+        return {
+            "log_type": "Form Details",
+            "log": form_logs
+        }
+
+    # Parallelize validation of rows
+    with ThreadPoolExecutor() as executor:
+        results = executor.map(validate_srsa_row, srsa_df.to_dict(orient="records"))
+
+    # Aggregate results
+    for result in results:
+        if result["log_type"] == "Supplier Risk Assessment Header":
+            validation_logs["Supplier Risk Assessment Header"].append(result["log"])
+        elif result["log_type"] == "Form Details":
+            validation_logs["Form Details"].extend(result["log"])
 
     return validation_logs
 
@@ -126,30 +150,37 @@ def save_validation_results(output_file_name, sheets, validation_logs):
                     validation_df.to_excel(writer, sheet_name=f"{sheet_name}", index=False)
             print(f"Validation results saved to {output_file_name}")
 
+def load_file_data(file_path):
+    """Helper function to load data from a single file."""
+    sheets = load_excel_sheets(file_path)
+    srsa_df = sheets["Supplier Risk Assessment Header"]
+    return srsa_df["Contract Id"].tolist()
+
+
 def fetch_all_data(db, files):
-    # Collect all contract IDs and document numbers from all files
-    all_contract_ids = []
-    all_document_numbers = []
+    all_contract_ids = set()
 
-    for excel_file in files:
-        sheets = load_excel_sheets(excel_file)
-        srsa_df = sheets["Supplier Risk Assessment Header"]
-        all_contract_ids.extend(srsa_df["Contract Id"].tolist())
+    # Load files in parallel
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = executor.map(load_file_data, files)
 
-    # Fetch SRSA documents in one query
+    for contract_ids in results:
+        all_contract_ids.update(contract_ids)
+
+    all_contract_ids = list(all_contract_ids)
+
+    # Fetch SRSA documents
     srsa_docs = fetch_srsa_documents(db, all_contract_ids)
     srsa_doc_map = {doc["revisedContractNumber"]: doc for doc in srsa_docs}
 
-    # Collect all document numbers for pre-contract SRSA documents
     all_document_numbers = [doc["documentNumber"] for doc in srsa_docs if "documentNumber" in doc]
 
-    # Fetch Pre-Contract SRSA documents in one query
     pre_contract_srsa_docs = fetch_pre_contract_srsa_documents(db, all_document_numbers)
     pre_contract_srsa_doc_map = {doc["documentNumber"]: doc for doc in pre_contract_srsa_docs}
     pre_contract_srsa_ids = [doc["internalDocumentId"] for doc in pre_contract_srsa_docs]
 
-    # Fetch Control Forms in one query
     control_forms = fetch_control_forms(db, pre_contract_srsa_ids)
+    
     control_form_map = {}
     for form in control_forms:
         supplier_rsa_id = form["supplierRSAId"]
@@ -159,43 +190,49 @@ def fetch_all_data(db, files):
 
     return srsa_doc_map, pre_contract_srsa_doc_map, control_form_map
 
+def process_file(excel_file, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map):
+    """Process a single Excel file."""
+    print(f"Processing file: {excel_file}")
+    sheets = load_excel_sheets(excel_file)
+    srsa_df = sheets["Supplier Risk Assessment Header"]
+    form_df = sheets["Form Details"]
+
+    # Validate data for the current file
+    validation_logs = validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map)
+    
+    output_folder = "Validation Result"
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Save validation results
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    input_file_name = os.path.splitext(os.path.basename(excel_file))[0]
+    output_file_name = os.path.join(output_folder, f"{input_file_name}_ValidationResult_{timestamp}.xlsx")
+    save_validation_results(output_file_name, sheets, validation_logs)
+
+    print(f"Finished processing file: {excel_file}")
+
 # --- Main Script ---
 def main():
+    start_time = time.time()  # Record the start time
     db = connect_to_db()
     files = select_files()
 
-
+    print("Fetching all data...")
     srsa_doc_map, pre_contract_srsa_doc_map, control_form_map = fetch_all_data(db, files)
+    print(f"Data fetching completed in {time.time() - start_time:.2f} seconds.")
 
-    for excel_file in files:
-        print(f"Processing file: {excel_file}")
-        sheets = load_excel_sheets(excel_file)
-        srsa_df = sheets["Supplier Risk Assessment Header"]
-        form_df = sheets["Form Details"]
+    batch_size = 5  # Number of files to process in each batch
+    file_batches = [files[i:i + batch_size] for i in range(0, len(files), batch_size)]
 
-        # contract_ids = srsa_df["Contract Id"].tolist()
-        # srsa_docs = fetch_srsa_documents(db, contract_ids)
-        # srsa_doc_map = {doc["revisedContractNumber"]: doc for doc in srsa_docs}
+    print("Processing files...")
+    with ThreadPoolExecutor(max_workers=10) as executor:
+            for batch in file_batches:
+                executor.map(process_file, batch, [srsa_doc_map] * len(batch), [pre_contract_srsa_doc_map] * len(batch), [control_form_map] * len(batch))
+    print(f"File processing completed in {time.time() - start_time:.2f} seconds.")
 
-        # document_numbers = [doc["documentNumber"] for doc in srsa_docs if "documentNumber" in doc]
-        # pre_contract_srsa_docs = fetch_pre_contract_srsa_documents(db, document_numbers)
-        # pre_contract_srsa_doc_map = {doc["documentNumber"]: doc for doc in pre_contract_srsa_docs}
-        # pre_contract_srsa_ids = [doc["internalDocumentId"] for doc in pre_contract_srsa_docs]
-
-        # control_forms = fetch_control_forms(db, pre_contract_srsa_ids)
-        # control_form_map = {}
-        # for form in control_forms:
-        #     supplier_rsa_id = form["supplierRSAId"]
-        #     if supplier_rsa_id not in control_form_map:
-        #         control_form_map[supplier_rsa_id] = []
-        #     control_form_map[supplier_rsa_id].append(form)
-
-        validation_logs = validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map)
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        input_file_name = os.path.splitext(os.path.basename(excel_file))[0]
-        output_file_name = f"{input_file_name}_ValidationResult_{timestamp}.xlsx"
-        save_validation_results(output_file_name, sheets, validation_logs)
+    end_time = time.time()  # Record the end time
+    print(f"Total execution time: {end_time - start_time:.2f} seconds")
 
 if __name__ == "__main__":
     main()
+   

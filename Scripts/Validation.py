@@ -37,6 +37,7 @@ def load_excel_sheets(file_path):
 
 # --- Fetch SRSA Documents ---
 def fetch_srsa_documents(db, contract_ids):
+    print(f"Fetching Post Contract SRSA documents for contract IDs: {contract_ids}")
     srsa_docs = list(db[SRSA_COLLECTION].find(
         {"revisedContractNumber": {"$in": contract_ids}, "isDeleted": False},
         {"internalDocumentId": 1, "documentNumber": 1, "revisedContractNumber": 1}
@@ -46,6 +47,7 @@ def fetch_srsa_documents(db, contract_ids):
 
 # --- Fetch Pre-Contract SRSA Documents ---
 def fetch_pre_contract_srsa_documents(db, document_numbers):
+    print(f"Fetching Pre Contract SRSA documents for document numbers: {document_numbers}")
     pre_contract_srsa_docs = list(db[SRSA_COLLECTION].find(
         {"documentNumber": {"$in": document_numbers}, "dueDiligencePhase": "Pre Contract"},
         {"internalDocumentId": 1, "documentNumber": 1}
@@ -55,6 +57,7 @@ def fetch_pre_contract_srsa_documents(db, document_numbers):
 
 # --- Fetch Control Forms ---
 def fetch_control_forms(db, pre_contract_srsa_ids):
+    print(f"Fetching Control Forms for SRSA IDs: {pre_contract_srsa_ids}")
     control_forms = list(db[FORM_COLLECTION].find(
         {
             "supplierRSAId": {"$in": pre_contract_srsa_ids},
@@ -123,10 +126,46 @@ def save_validation_results(output_file_name, sheets, validation_logs):
                     validation_df.to_excel(writer, sheet_name=f"{sheet_name}", index=False)
             print(f"Validation results saved to {output_file_name}")
 
+def fetch_all_data(db, files):
+    # Collect all contract IDs and document numbers from all files
+    all_contract_ids = []
+    all_document_numbers = []
+
+    for excel_file in files:
+        sheets = load_excel_sheets(excel_file)
+        srsa_df = sheets["Supplier Risk Assessment Header"]
+        all_contract_ids.extend(srsa_df["Contract Id"].tolist())
+
+    # Fetch SRSA documents in one query
+    srsa_docs = fetch_srsa_documents(db, all_contract_ids)
+    srsa_doc_map = {doc["revisedContractNumber"]: doc for doc in srsa_docs}
+
+    # Collect all document numbers for pre-contract SRSA documents
+    all_document_numbers = [doc["documentNumber"] for doc in srsa_docs if "documentNumber" in doc]
+
+    # Fetch Pre-Contract SRSA documents in one query
+    pre_contract_srsa_docs = fetch_pre_contract_srsa_documents(db, all_document_numbers)
+    pre_contract_srsa_doc_map = {doc["documentNumber"]: doc for doc in pre_contract_srsa_docs}
+    pre_contract_srsa_ids = [doc["internalDocumentId"] for doc in pre_contract_srsa_docs]
+
+    # Fetch Control Forms in one query
+    control_forms = fetch_control_forms(db, pre_contract_srsa_ids)
+    control_form_map = {}
+    for form in control_forms:
+        supplier_rsa_id = form["supplierRSAId"]
+        if supplier_rsa_id not in control_form_map:
+            control_form_map[supplier_rsa_id] = []
+        control_form_map[supplier_rsa_id].append(form)
+
+    return srsa_doc_map, pre_contract_srsa_doc_map, control_form_map
+
 # --- Main Script ---
 def main():
     db = connect_to_db()
     files = select_files()
+
+
+    srsa_doc_map, pre_contract_srsa_doc_map, control_form_map = fetch_all_data(db, files)
 
     for excel_file in files:
         print(f"Processing file: {excel_file}")
@@ -134,22 +173,22 @@ def main():
         srsa_df = sheets["Supplier Risk Assessment Header"]
         form_df = sheets["Form Details"]
 
-        contract_ids = srsa_df["Contract Id"].tolist()
-        srsa_docs = fetch_srsa_documents(db, contract_ids)
-        srsa_doc_map = {doc["revisedContractNumber"]: doc for doc in srsa_docs}
+        # contract_ids = srsa_df["Contract Id"].tolist()
+        # srsa_docs = fetch_srsa_documents(db, contract_ids)
+        # srsa_doc_map = {doc["revisedContractNumber"]: doc for doc in srsa_docs}
 
-        document_numbers = [doc["documentNumber"] for doc in srsa_docs if "documentNumber" in doc]
-        pre_contract_srsa_docs = fetch_pre_contract_srsa_documents(db, document_numbers)
-        pre_contract_srsa_doc_map = {doc["documentNumber"]: doc for doc in pre_contract_srsa_docs}
-        pre_contract_srsa_ids = [doc["internalDocumentId"] for doc in pre_contract_srsa_docs]
+        # document_numbers = [doc["documentNumber"] for doc in srsa_docs if "documentNumber" in doc]
+        # pre_contract_srsa_docs = fetch_pre_contract_srsa_documents(db, document_numbers)
+        # pre_contract_srsa_doc_map = {doc["documentNumber"]: doc for doc in pre_contract_srsa_docs}
+        # pre_contract_srsa_ids = [doc["internalDocumentId"] for doc in pre_contract_srsa_docs]
 
-        control_forms = fetch_control_forms(db, pre_contract_srsa_ids)
-        control_form_map = {}
-        for form in control_forms:
-            supplier_rsa_id = form["supplierRSAId"]
-            if supplier_rsa_id not in control_form_map:
-                control_form_map[supplier_rsa_id] = []
-            control_form_map[supplier_rsa_id].append(form)
+        # control_forms = fetch_control_forms(db, pre_contract_srsa_ids)
+        # control_form_map = {}
+        # for form in control_forms:
+        #     supplier_rsa_id = form["supplierRSAId"]
+        #     if supplier_rsa_id not in control_form_map:
+        #         control_form_map[supplier_rsa_id] = []
+        #     control_form_map[supplier_rsa_id].append(form)
 
         validation_logs = validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map)
 

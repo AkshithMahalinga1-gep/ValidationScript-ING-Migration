@@ -1,32 +1,54 @@
+import json
+
 # --- Fetch Control Forms ---
 def validate_response_data(validation_logs, formExcel, matching_form_mongo, response_df_excel, form_responses_mongo):
-    # print("Form Excel", formExcel)
-    # print("Type of Form Excel", type(formExcel))
-    # print("Response Excel", response_df_excel)
-    # print("Type of Response Excel", type(response_df_excel))
-
-    print("Debug: Form Excel:")
-    print("Available columns in formExcel:", formExcel.columns.tolist() if hasattr(formExcel, 'columns') else formExcel.keys())
-
     # Filter rows from response_df_excel based on the criteria
-    try:
-        print("Debug: Form Excel Reference ID*:", formExcel["Form Excel Reference ID*"])
-    except KeyError:
-        print("Error: 'Form Excel Reference ID*' not found in formExcel")
-    # print("Debug: Form Recurrence ID*:", formExcel["Form Recurrence ID*"])
-    # print("Debug: Response DF Reference ID*:", response_df_excel["Reference ID*"].tolist())
-    # print("Debug: Response DF Recurrence ID*:", response_df_excel["Form Recurrence ID*"].tolist())
     
-    filtered_rows = response_df_excel[
+    filtered_formResponse_Excel_rows = response_df_excel[
         (response_df_excel["Reference ID*"] == formExcel["Reference ID*"]) &
         (response_df_excel["Form Recurrence ID*"] == formExcel["Form Recurrence ID*"])
     ]
 
+    # print("Form Mongo", matching_form_mongo)
+    # print("Filtered Excel Rows", filtered_formResponse_Excel_rows)
+
+    if not filtered_formResponse_Excel_rows.empty and filtered_formResponse_Excel_rows["Master Form ID*"].iloc[0] == matching_form_mongo["sourceFormDocumentNumber"]:
+        filtered_formResponse_Excel_rows["internalDocumentId"] = matching_form_mongo["internalDocumentId"]
+
+    # print("Updated Filtered Excel Rows:")
+    # print(filtered_formResponse_Excel_rows)
+
+
+    for _, row in filtered_formResponse_Excel_rows.iterrows():
+        # Get the internalDocumentId from the row
+        internal_document_id = row.get("internalDocumentId")
+
+        # Skip if internalDocumentId is None
+        if internal_document_id is None:
+            continue
+
+        # Loop through form_responses_mongo to find a match
+        for form_response in form_responses_mongo:
+            if form_response["internalDocumentId"] == internal_document_id:
+                # Check questionnaireDetails and questions for matching conditions
+                for questionnaire_detail in form_response.get("questionnaireDetails", []):
+                    for question in questionnaire_detail.get("questions", []):
+                        if (question.get("mappedQuestionId") == row["Question Number [QB Number]*"]):
+                            if row["Response*"] not in question.get("responseValue", []):
+                                validation_logs["Form Response"].append({
+                                    "formRecurrenceId": row["Form Recurrence ID*"],
+                                    "referenceId": row["Reference ID*"],
+                                    "masterFormId": row["Master Form ID*"],
+                                    "response": row["Response*"],
+                                    "internalDocumentId": internal_document_id,
+                                    "mongoDetail": question,
+                                })
+
     # Print the filtered rows
-    if filtered_rows.empty:
+    if filtered_formResponse_Excel_rows.empty:
         print("Filtered Rows: No matching rows found. Please check the filtering criteria.")
-    else:
-        print("Filtered Rows:")
-        print(filtered_rows)
-    # print("Response Mongo", form_responses)
-    return ""
+  
+    # Save validation_logs to a new JSON file
+    # with open("validation_logs_output.json", "w", encoding="utf-8") as f:
+    #     json.dump(validation_logs, f, ensure_ascii=False, indent=4)
+    return validation_logs

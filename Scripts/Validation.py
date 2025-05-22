@@ -148,14 +148,16 @@ def validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, con
 # --- Save Validation Results ---
 def save_validation_results(output_file_name, sheets, validation_logs):
     if any(validation_logs[sheet_name] for sheet_name in validation_logs):
-        with pd.ExcelWriter(output_file_name, engine='xlsxwriter') as writer:
-            # Write validation logs to corresponding sheets
-            for sheet_name, sheet_data in sheets.items():
-                # Write original data to the sheet
-                if validation_logs[sheet_name]:
-                    validation_df = pd.DataFrame(validation_logs[sheet_name])
-                    validation_df.to_excel(writer, sheet_name=f"{sheet_name}", index=False)
-            print(f"Validation results saved to {output_file_name}")
+        try:
+            with pd.ExcelWriter(output_file_name, engine='xlsxwriter') as writer:
+                # Write validation logs to corresponding sheets
+                for sheet_name, logs in validation_logs.items():
+                    if logs:
+                        validation_df = pd.DataFrame(logs)
+                        validation_df.to_excel(writer, sheet_name=f"{sheet_name}", index=False)
+                print(f"Validation results saved to {output_file_name}")
+        except Exception as e:
+            print(f"ERROR WHILE SAVING RESULT IN EXCEL {output_file_name}: {e}")
     else:
         print(f"No validation issues found for {output_file_name}. No file created.")
 

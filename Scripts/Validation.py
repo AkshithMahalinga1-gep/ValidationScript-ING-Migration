@@ -7,6 +7,9 @@ from datetime import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+from mongoCalls import apiCall, fetch_forms_responses
+from validationHelper import validate_response_data
 
 
 
@@ -15,7 +18,7 @@ MONGO_URI = "mongodb+srv://uatleoeutenantdocteamsro:XnfQ6pixSookjshO@uat-eu-leo.
 DB_NAME = "uatdomainmodeling"
 SRSA_COLLECTION = "riskAssessment_1664901704"
 FORM_COLLECTION = "form_1663277990"
-RESPONSE_COLLECTION = "responses"
+RESPONSE_COLLECTION = "documentQuestionnaire_1695405087"
 
 # --- MongoDB Connection ---
 def connect_to_db():
@@ -75,7 +78,7 @@ def fetch_control_forms(db, pre_contract_srsa_ids):
 
 from concurrent.futures import ThreadPoolExecutor
 
-def validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map):
+def validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map, response_df_excel, form_responses_mongo):
     validation_logs = {
         "Supplier Risk Assessment Header": [],
         "Form Details": [],
@@ -119,6 +122,10 @@ def validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, con
                     "SRSAID": preContractSrsa_internalDocumentId,
                     "SRSDocumentNumber": documentNumber
                 })
+            else:
+                matching_form_mongo = next((linked_form for linked_form in linked_forms if form["Master Form ID*"] == linked_form["sourceFormDocumentNumber"]), None)
+                if matching_form_mongo:
+                    validate_response_data(validation_logs, form, matching_form_mongo, response_df_excel, form_responses_mongo)
 
         return {
             "log_type": "Form Details",
@@ -140,21 +147,31 @@ def validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, con
 
 # --- Save Validation Results ---
 def save_validation_results(output_file_name, sheets, validation_logs):
-     if any(validation_logs[sheet_name] for sheet_name in validation_logs):
-        with pd.ExcelWriter(output_file_name, engine='xlsxwriter') as writer:
-            # Write validation logs to corresponding sheets
-            for sheet_name, sheet_data in sheets.items():
-                # Write original data to the sheet
-                if validation_logs[sheet_name]:
-                    validation_df = pd.DataFrame(validation_logs[sheet_name])
-                    validation_df.to_excel(writer, sheet_name=f"{sheet_name}", index=False)
-            print(f"Validation results saved to {output_file_name}")
+    if any(validation_logs[sheet_name] for sheet_name in validation_logs):
+        try:
+            with pd.ExcelWriter(output_file_name, engine='xlsxwriter') as writer:
+                # Write validation logs to corresponding sheets
+                for sheet_name, logs in validation_logs.items():
+                    if logs:
+                        validation_df = pd.DataFrame(logs)
+                        validation_df.to_excel(writer, sheet_name=f"{sheet_name}", index=False)
+                print(f"Validation results saved to {output_file_name}")
+        except Exception as e:
+            print(f"ERROR WHILE SAVING RESULT IN EXCEL {output_file_name}: {e}")
+    else:
+        print(f"No validation issues found for {output_file_name}. No file created.")
 
 def load_file_data(file_path):
     """Helper function to load data from a single file."""
     sheets = load_excel_sheets(file_path)
     srsa_df = sheets["Supplier Risk Assessment Header"]
     return srsa_df["Contract Id"].tolist()
+
+def load_questionNumber(file_path):
+    """Helper function to load data from a single file."""
+    sheets = load_excel_sheets(file_path)
+    formResponse_df = sheets["Form Response"]
+    return formResponse_df["Question Number [QB Number]*"].drop_duplicates().tolist()
 
 
 def fetch_all_data(db, files):
@@ -180,6 +197,17 @@ def fetch_all_data(db, files):
     pre_contract_srsa_ids = [doc["internalDocumentId"] for doc in pre_contract_srsa_docs]
 
     control_forms = fetch_control_forms(db, pre_contract_srsa_ids)
+
+    form_responses = fetch_forms_responses(db, control_forms, RESPONSE_COLLECTION)
+    
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        questionNumbers = executor.map(load_questionNumber, files)
+        
+    distinct_questionNumbers = set()
+    for qn_list in questionNumbers:
+        distinct_questionNumbers.update(qn_list)
+    
+    questionMappings = apiCall(list(distinct_questionNumbers))
     
     control_form_map = {}
     for form in control_forms:
@@ -188,17 +216,27 @@ def fetch_all_data(db, files):
             control_form_map[supplier_rsa_id] = []
         control_form_map[supplier_rsa_id].append(form)
 
-    return srsa_doc_map, pre_contract_srsa_doc_map, control_form_map
+    # Update form_responses with questionMappings values
+    for form_response in form_responses:
+        for questionnaire_detail in form_response.get("questionnaireDetails", []):
+            for question in questionnaire_detail.get("questions", []):
+                question_library_id = question.get("questionLibraryQuestionId")
+                if questionMappings and question_library_id in questionMappings:
+                    # Add the value from questionMappings to the question object
+                    question["mappedQuestionId"] = questionMappings[question_library_id]
 
-def process_file(excel_file, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map):
+    return srsa_doc_map, pre_contract_srsa_doc_map, control_form_map, form_responses
+
+def process_file(excel_file, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map, form_responses):
     """Process a single Excel file."""
     print(f"Processing file: {excel_file}")
     sheets = load_excel_sheets(excel_file)
     srsa_df = sheets["Supplier Risk Assessment Header"]
     form_df = sheets["Form Details"]
+    response_df = sheets["Form Response"]
 
     # Validate data for the current file
-    validation_logs = validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map)
+    validation_logs = validate_data(srsa_df, form_df, srsa_doc_map, pre_contract_srsa_doc_map, control_form_map, response_df, form_responses)
     
     output_folder = "Validation Result"
     os.makedirs(output_folder, exist_ok=True)
@@ -218,7 +256,7 @@ def main():
     files = select_files()
 
     print("Fetching all data...")
-    srsa_doc_map, pre_contract_srsa_doc_map, control_form_map = fetch_all_data(db, files)
+    srsa_doc_map, pre_contract_srsa_doc_map, control_form_map, form_responses = fetch_all_data(db, files)
     print(f"Data fetching completed in {time.time() - start_time:.2f} seconds.")
 
     batch_size = 5  # Number of files to process in each batch
@@ -227,7 +265,7 @@ def main():
     print("Processing files...")
     with ThreadPoolExecutor(max_workers=10) as executor:
             for batch in file_batches:
-                executor.map(process_file, batch, [srsa_doc_map] * len(batch), [pre_contract_srsa_doc_map] * len(batch), [control_form_map] * len(batch))
+                executor.map(process_file, batch, [srsa_doc_map] * len(batch), [pre_contract_srsa_doc_map] * len(batch), [control_form_map] * len(batch), [form_responses] * len(batch))
     print(f"File processing completed in {time.time() - start_time:.2f} seconds.")
 
     end_time = time.time()  # Record the end time

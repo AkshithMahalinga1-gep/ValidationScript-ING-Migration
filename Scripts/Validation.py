@@ -14,7 +14,7 @@ from validationHelper import validate_response_data
 
 
 # --- Configuration ---
-MONGO_URI = "mongodb+srv://uatleoeutenantdocteamsro:XnfQ6pixSookjshO@uat-eu-leo.mwfvc.mongodb.net/?ssl=true&authSource=admin&retryWrites=true&readPreference=secondaryPreferred&w=majority&wtimeoutMS=5000&readConcernLevel=majority&retryReads=true&appName=docteamtprmro"
+MONGO_URI = ""
 DB_NAME = "uatdomainmodeling"
 SRSA_COLLECTION = "riskAssessment_1664901704"
 FORM_COLLECTION = "form_1663277990"
